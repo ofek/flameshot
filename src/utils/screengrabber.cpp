@@ -196,12 +196,18 @@ QPixmap ScreenGrabber::grabEntireDesktop(bool& ok)
     QRect geometry = desktopGeometry();
     QScreen* primaryScreen = QGuiApplication::primaryScreen();
     QRect r = primaryScreen->geometry();
+#if defined(Q_OS_WIN)
+    // On Windows, use logical coordinates directly
+    QPixmap desktop = primaryScreen->grabWindow(
+      wid, -r.x(), -r.y(), geometry.width(), geometry.height());
+#else
     QPixmap desktop =
       primaryScreen->grabWindow(wid,
                                 -r.x() / primaryScreen->devicePixelRatio(),
                                 -r.y() / primaryScreen->devicePixelRatio(),
                                 geometry.width(),
                                 geometry.height());
+#endif
 
     return selectMonitorAndCrop(desktop, ok);
 #endif
@@ -253,12 +259,15 @@ QRect ScreenGrabber::desktopGeometry()
 
     for (QScreen* const screen : QGuiApplication::screens()) {
         QRect scrRect = screen->geometry();
+#if !defined(Q_OS_WIN)
         // Qt6 fix: Don't divide by devicePixelRatio for multi-monitor setups
         // This was causing coordinate offset issues in dual monitor
         // configurations
         // But it still has a screen position in real pixels, not logical ones
+        // On Windows, geometry() already returns logical coordinates
         qreal dpr = screen->devicePixelRatio();
         scrRect.moveTo(QPointF(scrRect.x() / dpr, scrRect.y() / dpr).toPoint());
+#endif
         geometry = geometry.united(scrRect);
     }
     return geometry;
@@ -420,6 +429,41 @@ QPixmap ScreenGrabber::cropToMonitor(const QPixmap& fullScreenshot,
 #endif
 
     // Calculate the scaling factor used in the screenshot
+#if defined(Q_OS_WIN)
+    // On Windows with mixed DPI monitors, each screen is captured at its native
+    // DPI Calculate the physical pixel offset for each screen
+    int targetPhysicalX = 0;
+    int targetPhysicalY = 0;
+
+    int i = 0;
+    while (i < monitorIndex && i < screens.size()) {
+        QScreen* screen = screens[i];
+        QRect geo = screen->geometry();
+        qreal dpr = screen->devicePixelRatio();
+
+        // Accumulate physical pixels from screens to the left
+        if (geo.x() + geo.width() <= targetGeometry.x()) {
+            targetPhysicalX += qRound(geo.width() * dpr);
+        }
+        // Accumulate physical pixels from screens above
+        if (geo.y() + geo.height() <= targetGeometry.y()) {
+            targetPhysicalY += qRound(geo.height() * dpr);
+        }
+
+        ++i;
+    }
+
+    int cropX = targetPhysicalX;
+    int cropY = targetPhysicalY;
+    int cropWidth = qRound(targetGeometry.width() * targetDpr);
+    int cropHeight = qRound(targetGeometry.height() * targetDpr);
+
+#ifdef FLAMESHOT_DEBUG_CAPTURE
+    qDebug() << tr("Windows mixed DPI: physical offset X=%1 Y=%2")
+                  .arg(cropX)
+                  .arg(cropY);
+#endif
+#else
     qreal screenshotScaleX = (qreal)fullScreenshot.width() / totalLogicalWidth;
     qreal screenshotScaleY =
       (qreal)fullScreenshot.height() / totalLogicalHeight;
@@ -434,6 +478,7 @@ QPixmap ScreenGrabber::cropToMonitor(const QPixmap& fullScreenshot,
     int cropY = qRound((targetGeometry.y() - minY) * screenshotScaleY);
     int cropWidth = qRound(targetGeometry.width() * screenshotScaleX);
     int cropHeight = qRound(targetGeometry.height() * screenshotScaleY);
+#endif
 
     QRect cropRect(cropX, cropY, cropWidth, cropHeight);
 
